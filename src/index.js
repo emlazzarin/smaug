@@ -5,8 +5,11 @@
  */
 
 // Core processing
-export { fetchAndPrepareBookmarks } from './processor.js';
 export {
+  fetchAndPrepareBookmarks,
+  processAllBookmarks,
+  processBookmarkToFile,
+  getExistingBookmarkFiles,
   fetchBookmarks,
   fetchTweet,
   expandTcoLink,
@@ -17,9 +20,42 @@ export {
   saveState
 } from './processor.js';
 
+// Thread resolution
+export {
+  resolveThread,
+  fetchThread,
+  classifyTweet,
+  findAncestorChain
+} from './thread-resolver.js';
+
+// Media downloading
+export {
+  downloadTweetMedia,
+  downloadThreadMedia,
+  downloadMedia,
+  getMediaStats
+} from './media-downloader.js';
+
+// Markdown generation
+export {
+  generateBookmarkMarkdown,
+  writeBookmarkFile,
+  bookmarkFileExists,
+  generateBookmarkFilename
+} from './markdown-writer.js';
+
 // Configuration
 export { loadConfig, initConfig } from './config.js';
 
-// Scheduled job runner
+// Shared utilities
+export {
+  getAuthor,
+  getAuthorName,
+  formatTimestamp,
+  formatBytes,
+  buildBirdEnv
+} from './utils.js';
+
+// Scheduled job runner (legacy)
 export { run as runJob } from './job.js';
 export { default as job } from './job.js';

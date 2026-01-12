@@ -10,7 +10,7 @@
  * Outputs a JSON bundle for AI analysis (Claude Code, etc.)
  */
 
-import { execSync, spawn } from 'child_process';
+import { execSync } from 'child_process';
 import fs from 'fs';
 import path from 'path';
 import os from 'os';
@@ -18,6 +18,10 @@ import dayjs from 'dayjs';
 import utc from 'dayjs/plugin/utc.js';
 import timezone from 'dayjs/plugin/timezone.js';
 import { loadConfig } from './config.js';
+import { resolveThread } from './thread-resolver.js';
+import { downloadThreadMedia, getMediaStats } from './media-downloader.js';
+import { writeBookmarkFile, bookmarkFileExists } from './markdown-writer.js';
+import { buildBirdEnv } from './utils.js';
 
 dayjs.extend(utc);
 dayjs.extend(timezone);
@@ -56,17 +60,6 @@ export function saveState(config, state) {
     fs.mkdirSync(dir, { recursive: true });
   }
   fs.writeFileSync(config.stateFile, JSON.stringify(state, null, 2) + '\n');
-}
-
-function buildBirdEnv(config) {
-  const env = { ...process.env };
-  if (config.twitter?.authToken) {
-    env.AUTH_TOKEN = config.twitter.authToken;
-  }
-  if (config.twitter?.ct0) {
-    env.CT0 = config.twitter.ct0;
-  }
-  return env;
 }
 
 export function fetchBookmarks(config, count = 10, options = {}) {
@@ -135,25 +128,29 @@ export function fetchLikes(config, count = 10) {
 export function fetchFromSource(config, count = 10, options = {}) {
   const source = config.source || 'bookmarks';
 
-  if (source === 'bookmarks') {
-    return fetchBookmarks(config, count, options);
-  } else if (source === 'likes') {
-    return fetchLikes(config, count);
-  } else if (source === 'both') {
-    const bookmarks = fetchBookmarks(config, count, options);
-    const likes = fetchLikes(config, count);
-    // Merge and dedupe by ID
-    const seen = new Set();
-    const merged = [];
-    for (const item of [...bookmarks, ...likes]) {
-      if (!seen.has(item.id)) {
-        seen.add(item.id);
-        merged.push(item);
+  switch (source) {
+    case 'bookmarks':
+      return fetchBookmarks(config, count, options);
+
+    case 'likes':
+      return fetchLikes(config, count);
+
+    case 'both': {
+      const bookmarks = fetchBookmarks(config, count, options);
+      const likes = fetchLikes(config, count);
+      const seen = new Set();
+      const merged = [];
+      for (const item of [...bookmarks, ...likes]) {
+        if (!seen.has(item.id)) {
+          seen.add(item.id);
+          merged.push(item);
+        }
       }
+      return merged;
     }
-    return merged;
-  } else {
-    throw new Error(`Invalid source: ${source}. Must be 'bookmarks', 'likes', or 'both'.`);
+
+    default:
+      throw new Error(`Invalid source: ${source}. Must be 'bookmarks', 'likes', or 'both'.`);
   }
 }
 
@@ -253,6 +250,46 @@ function extractGitHubInfo(url) {
   const match = url.match(/github\.com\/([^\/]+)\/([^\/]+)/);
   if (!match) return null;
   return { owner: match[1], repo: match[2].replace(/\.git$/, '') };
+}
+
+/**
+ * Classify a URL into a content type
+ */
+function classifyLinkType(url) {
+  if (url.includes('github.com')) {
+    return 'github';
+  }
+  if (url.includes('youtube.com') || url.includes('youtu.be')) {
+    return 'video';
+  }
+  if (url.includes('x.com') || url.includes('twitter.com')) {
+    if (url.includes('/photo/') || url.includes('/video/')) {
+      return 'media';
+    }
+    return 'tweet';
+  }
+  if (url.match(/\.(jpg|jpeg|png|gif|webp)$/i)) {
+    return 'image';
+  }
+  return 'article';
+}
+
+/**
+ * Extract tweet context from a tweet object
+ */
+function extractTweetContext(tweet, source = null) {
+  const author = tweet.author?.username || 'unknown';
+  const context = {
+    id: tweet.id,
+    author,
+    authorName: tweet.author?.name || author,
+    text: tweet.text || tweet.full_text || '',
+    tweetUrl: `https://x.com/${author}/status/${tweet.id}`
+  };
+  if (source) {
+    context.source = source;
+  }
+  return context;
 }
 
 export async function fetchGitHubContent(url) {
@@ -461,41 +498,19 @@ export async function fetchAndPrepareBookmarks(options = {}) {
         const expanded = await expandTcoLink(link);
         console.log(`  Expanded: ${link} -> ${expanded}`);
 
-        // Categorize the link
-        let type = 'unknown';
+        const type = classifyLinkType(expanded);
         let content = null;
 
-        if (expanded.includes('github.com')) {
-          type = 'github';
-        } else if (expanded.includes('youtube.com') || expanded.includes('youtu.be')) {
-          type = 'video';
-        } else if (expanded.includes('x.com') || expanded.includes('twitter.com')) {
-          if (expanded.includes('/photo/') || expanded.includes('/video/')) {
-            type = 'media';
-          } else {
-            type = 'tweet';
-            // Quote tweet - fetch the quoted tweet for context
-            const tweetIdMatch = expanded.match(/status\/(\d+)/);
-            if (tweetIdMatch) {
-              const quotedTweetId = tweetIdMatch[1];
-              console.log(`  Quote tweet detected, fetching ${quotedTweetId}...`);
-              const quotedTweet = fetchTweet(config, quotedTweetId);
-              if (quotedTweet) {
-                content = {
-                  id: quotedTweet.id,
-                  author: quotedTweet.author?.username || 'unknown',
-                  authorName: quotedTweet.author?.name || quotedTweet.author?.username || 'unknown',
-                  text: quotedTweet.text || quotedTweet.full_text || '',
-                  tweetUrl: `https://x.com/${quotedTweet.author?.username || 'unknown'}/status/${quotedTweet.id}`,
-                  source: 'quote-tweet'
-                };
-              }
+        // For quote tweets, fetch the quoted tweet for context
+        if (type === 'tweet') {
+          const tweetIdMatch = expanded.match(/status\/(\d+)/);
+          if (tweetIdMatch) {
+            console.log(`  Quote tweet detected, fetching ${tweetIdMatch[1]}...`);
+            const quotedTweet = fetchTweet(config, tweetIdMatch[1]);
+            if (quotedTweet) {
+              content = extractTweetContext(quotedTweet, 'quote-tweet');
             }
           }
-        } else if (expanded.match(/\.(jpg|jpeg|png|gif|webp)$/i)) {
-          type = 'image';
-        } else {
-          type = 'article';
         }
 
         // Fetch content for articles and GitHub repos
@@ -529,12 +544,7 @@ export async function fetchAndPrepareBookmarks(options = {}) {
           }
         }
 
-        links.push({
-          original: link,
-          expanded,
-          type,
-          content
-        });
+        links.push({ original: link, expanded, type, content });
       }
 
       // If this is a reply, fetch the parent tweet for context
@@ -543,28 +553,14 @@ export async function fetchAndPrepareBookmarks(options = {}) {
         console.log(`  This is a reply to ${bookmark.inReplyToStatusId}, fetching parent...`);
         const parentTweet = fetchTweet(config, bookmark.inReplyToStatusId);
         if (parentTweet) {
-          replyContext = {
-            id: parentTweet.id,
-            author: parentTweet.author?.username || 'unknown',
-            authorName: parentTweet.author?.name || parentTweet.author?.username || 'unknown',
-            text: parentTweet.text || parentTweet.full_text || '',
-            tweetUrl: `https://x.com/${parentTweet.author?.username || 'unknown'}/status/${parentTweet.id}`
-          };
+          replyContext = extractTweetContext(parentTweet);
         }
       }
 
       // Check for native quote tweet
       let quoteContext = null;
       if (bookmark.quotedTweet) {
-        const qt = bookmark.quotedTweet;
-        quoteContext = {
-          id: qt.id,
-          author: qt.author?.username || 'unknown',
-          authorName: qt.author?.name || qt.author?.username || 'unknown',
-          text: qt.text || '',
-          tweetUrl: `https://x.com/${qt.author?.username || 'unknown'}/status/${qt.id}`,
-          source: 'native-quote'
-        };
+        quoteContext = extractTweetContext(bookmark.quotedTweet, 'native-quote');
       }
 
       // Capture media attachments (photos, videos, GIFs) - EXPERIMENTAL
@@ -642,4 +638,154 @@ export async function fetchAndPrepareBookmarks(options = {}) {
   saveState(config, state);
 
   return { bookmarks: prepared, count: prepared.length, pendingFile: config.pendingFile };
+}
+
+/**
+ * Process a single bookmark to an individual markdown file
+ * Handles thread resolution, media downloading, and markdown generation
+ */
+export async function processBookmarkToFile(bookmark, config) {
+  const author = bookmark.author || 'unknown';
+  console.log(`\nProcessing @${author}'s bookmark ${bookmark.id}...`);
+
+  // Check if already processed
+  if (bookmarkFileExists(bookmark, config)) {
+    console.log(`  Already processed, skipping`);
+    return { skipped: true, reason: 'already_processed' };
+  }
+
+  // 1. Resolve thread context
+  console.log(`  Resolving thread context...`);
+  const threadData = resolveThread(bookmark, config);
+  console.log(`  Type: ${threadData.type}, ${threadData.tweets.length} tweet(s)`);
+
+  // 2. Download media (if enabled)
+  let mediaResults = [];
+  if (config.downloadMedia) {
+    const totalMedia = threadData.tweets.reduce((sum, t) => sum + (t.media?.length || 0), 0);
+    if (totalMedia > 0) {
+      console.log(`  Downloading ${totalMedia} media file(s)...`);
+      mediaResults = await downloadThreadMedia(threadData.tweets, config.mediaDir, config);
+      const stats = getMediaStats(mediaResults);
+      console.log(`  Media: ${stats.successful}/${stats.total} downloaded (${stats.totalSizeFormatted})`);
+    }
+  }
+
+  // 3. Write individual markdown file
+  console.log(`  Writing markdown file...`);
+  const fileResult = writeBookmarkFile(bookmark, threadData, mediaResults, config);
+  console.log(`  Created: ${fileResult.filename}`);
+
+  return {
+    success: true,
+    id: bookmark.id,
+    author,
+    threadType: threadData.type,
+    threadLength: threadData.tweets.length,
+    mediaDownloaded: mediaResults.filter(m => m.success).length,
+    mediaFailed: mediaResults.filter(m => !m.success).length,
+    outputFile: fileResult.filename
+  };
+}
+
+/**
+ * Process all pending bookmarks to individual files
+ * This is the new main processing function that replaces Claude-based processing
+ */
+export async function processAllBookmarks(options = {}) {
+  const config = loadConfig(options.configPath);
+  const now = dayjs().tz(config.timezone || 'America/New_York');
+  console.log(`[${now.format()}] Processing bookmarks to individual files...`);
+
+  // Load pending bookmarks
+  if (!fs.existsSync(config.pendingFile)) {
+    console.log('No pending bookmarks to process');
+    return { processed: 0, skipped: 0, failed: 0 };
+  }
+
+  const pending = JSON.parse(fs.readFileSync(config.pendingFile, 'utf8'));
+  const bookmarks = pending.bookmarks || [];
+
+  if (bookmarks.length === 0) {
+    console.log('No pending bookmarks to process');
+    return { processed: 0, skipped: 0, failed: 0 };
+  }
+
+  console.log(`Found ${bookmarks.length} pending bookmark(s)`);
+
+  // Ensure output directories exist
+  if (!fs.existsSync(config.bookmarksDir)) {
+    fs.mkdirSync(config.bookmarksDir, { recursive: true });
+  }
+  if (config.downloadMedia && !fs.existsSync(config.mediaDir)) {
+    fs.mkdirSync(config.mediaDir, { recursive: true });
+  }
+
+  const results = {
+    processed: 0,
+    skipped: 0,
+    failed: 0,
+    files: []
+  };
+
+  // Process each bookmark
+  for (const bookmark of bookmarks) {
+    try {
+      const result = await processBookmarkToFile(bookmark, config);
+
+      if (result.skipped) {
+        results.skipped++;
+      } else if (result.success) {
+        results.processed++;
+        results.files.push(result.outputFile);
+      }
+    } catch (error) {
+      console.error(`  Error processing bookmark ${bookmark.id}: ${error.message}`);
+      results.failed++;
+    }
+  }
+
+  // Clear pending file after processing
+  if (results.processed > 0 || results.skipped > 0) {
+    const remainingBookmarks = bookmarks.filter(b => {
+      // Keep only bookmarks that failed
+      return !results.files.some(f => f.includes(b.id));
+    });
+
+    if (remainingBookmarks.length === 0) {
+      // All processed, clear the file
+      fs.writeFileSync(config.pendingFile, JSON.stringify({ bookmarks: [], count: 0 }, null, 2));
+    } else {
+      // Some failed, keep them for retry
+      fs.writeFileSync(config.pendingFile, JSON.stringify({
+        bookmarks: remainingBookmarks,
+        count: remainingBookmarks.length
+      }, null, 2));
+    }
+  }
+
+  // Update state
+  const state = loadState(config);
+  state.last_processing_run = now.toISOString();
+  saveState(config, state);
+
+  console.log(`\nProcessing complete:`);
+  console.log(`  Processed: ${results.processed}`);
+  console.log(`  Skipped: ${results.skipped}`);
+  console.log(`  Failed: ${results.failed}`);
+
+  return results;
+}
+
+/**
+ * Get list of existing bookmark files
+ */
+export function getExistingBookmarkFiles(config) {
+  if (!fs.existsSync(config.bookmarksDir)) {
+    return [];
+  }
+
+  return fs.readdirSync(config.bookmarksDir)
+    .filter(f => f.endsWith('.md'))
+    .map(f => path.join(config.bookmarksDir, f));
 }

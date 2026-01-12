@@ -15,11 +15,37 @@ const DEFAULT_CONFIG = {
   // Source to fetch from: 'bookmarks', 'likes', or 'both'
   source: 'bookmarks',
 
-  // EXPERIMENTAL: Include media attachments (photos, videos, GIFs)
-  // Off by default - enable with --media flag or config
+  // ---- Individual Bookmark Files ----
+  // Directory for individual bookmark markdown files
+  bookmarksDir: './bookmarks',
+
+  // Directory for downloaded media files
+  mediaDir: './bookmarks/media',
+
+  // Download media files (images, GIFs; thumbnails for videos)
+  downloadMedia: true,
+
+  // Expand threads: fetch full same-author threads
+  expandThreads: true,
+
+  // Maximum tweets to fetch in a thread
+  maxThreadDepth: 50,
+
+  // Timeout for media downloads (ms)
+  mediaTimeout: 30000,
+
+  // Maximum media file size (bytes) - 10MB default
+  maxMediaSize: 10 * 1024 * 1024,
+
+  // Timezone for filename timestamps (YYYYMMDDHHMMSS format)
+  fileTimezone: 'UTC',
+
+  // ---- Legacy settings (kept for backward compatibility) ----
+
+  // DEPRECATED: Include media attachments in JSON (use downloadMedia instead)
   includeMedia: false,
 
-  // Where to store the markdown archive
+  // DEPRECATED: Single archive file (replaced by individual files)
   archiveFile: './bookmarks.md',
 
   // Where to store pending bookmarks (JSON) before processing
@@ -28,7 +54,7 @@ const DEFAULT_CONFIG = {
   // State file for tracking last processed bookmark
   stateFile: './.state/bookmarks-state.json',
 
-  // Timezone for date formatting
+  // Timezone for date formatting in markdown content
   timezone: 'America/New_York',
 
   // Path to bird CLI (if not in PATH)
@@ -211,6 +237,26 @@ export function loadConfig(configPath) {
   if (process.env.INCLUDE_MEDIA !== undefined) {
     config.includeMedia = process.env.INCLUDE_MEDIA === 'true';
   }
+
+  // New individual file settings
+  if (process.env.BOOKMARKS_DIR) {
+    config.bookmarksDir = process.env.BOOKMARKS_DIR;
+  }
+  if (process.env.MEDIA_DIR) {
+    config.mediaDir = process.env.MEDIA_DIR;
+  }
+  if (process.env.DOWNLOAD_MEDIA !== undefined) {
+    config.downloadMedia = process.env.DOWNLOAD_MEDIA === 'true';
+  }
+  if (process.env.EXPAND_THREADS !== undefined) {
+    config.expandThreads = process.env.EXPAND_THREADS === 'true';
+  }
+  if (process.env.MAX_THREAD_DEPTH) {
+    config.maxThreadDepth = parseInt(process.env.MAX_THREAD_DEPTH, 10);
+  }
+  if (process.env.FILE_TIMEZONE) {
+    config.fileTimezone = process.env.FILE_TIMEZONE;
+  }
   if (process.env.AUTH_TOKEN) {
     config.twitter.authToken = process.env.AUTH_TOKEN;
   }
@@ -244,6 +290,8 @@ export function loadConfig(configPath) {
   config.stateFile = expandTilde(config.stateFile);
   config.birdPath = expandTilde(config.birdPath);
   config.projectRoot = expandTilde(config.projectRoot);
+  config.bookmarksDir = expandTilde(config.bookmarksDir);
+  config.mediaDir = expandTilde(config.mediaDir);
 
   // Expand ~ in category folders
   if (config.categories) {
@@ -264,13 +312,27 @@ export function initConfig(targetPath = './smaug.config.json') {
   const exampleConfig = {
     // Source: 'bookmarks' (default), 'likes', or 'both'
     source: 'bookmarks',
-    // EXPERIMENTAL: Include media attachments (photos, videos, GIFs)
-    // includeMedia: false,
-    archiveFile: './bookmarks.md',
+
+    // ---- Individual Bookmark Files ----
+    // Each bookmark gets its own markdown file: YYYYMMDDHHMMSS_author.md
+    bookmarksDir: './bookmarks',
+    mediaDir: './bookmarks/media',
+
+    // Download media files (images, GIFs; thumbnails for videos)
+    downloadMedia: true,
+
+    // Expand threads: fetch full same-author threads
+    expandThreads: true,
+
+    // Timezone for filename timestamps
+    fileTimezone: 'UTC',
+
+    // ---- State and paths ----
     pendingFile: './.state/pending-bookmarks.json',
     stateFile: './.state/bookmarks-state.json',
     timezone: 'America/New_York',
     birdPath: null,
+
     twitter: {
       authToken: 'YOUR_AUTH_TOKEN_HERE',
       ct0: 'YOUR_CT0_TOKEN_HERE'
@@ -278,16 +340,14 @@ export function initConfig(targetPath = './smaug.config.json') {
 
     // Bookmark folders - map folder IDs to tag names
     // Get folder IDs from URLs like: https://x.com/i/bookmarks/1234567890
-    // When configured, Smaug fetches from each folder and tags bookmarks accordingly
     folders: {
       // Example:
       // "1234567890": "ai-tools",
       // "0987654321": "articles-to-read"
     },
 
-    // Categories define how different bookmark types are handled
-    // Customize or add your own! See README for details.
-    // Defaults: github->tools, articles->articles, youtube/podcast->transcribe
+    // Categories define how linked content is extracted to knowledge/
+    // GitHub repos -> knowledge/tools/, articles -> knowledge/articles/
     categories: {
       // Example: Add a custom category for research papers
       // research: {

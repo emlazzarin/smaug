@@ -12,7 +12,7 @@
  *   init     - Create a config file (non-interactive)
  */
 
-import { fetchAndPrepareBookmarks } from './processor.js';
+import { fetchAndPrepareBookmarks, processAllBookmarks, getExistingBookmarkFiles } from './processor.js';
 import { initConfig, loadConfig } from './config.js';
 import { execSync } from 'child_process';
 import fs from 'fs';
@@ -124,7 +124,11 @@ This will set up Smaug to automatically archive your Twitter bookmarks.
   // Step 4: Create config
   console.log('Step 4: Creating configuration...');
   const config = {
-    archiveFile: './bookmarks.md',
+    bookmarksDir: './bookmarks',
+    mediaDir: './bookmarks/media',
+    downloadMedia: true,
+    expandThreads: true,
+    fileTimezone: 'UTC',
     pendingFile: './.state/pending-bookmarks.json',
     stateFile: './.state/bookmarks-state.json',
     timezone: Intl.DateTimeFormat().resolvedOptions().timeZone || 'America/New_York',
@@ -132,8 +136,7 @@ This will set up Smaug to automatically archive your Twitter bookmarks.
       authToken,
       ct0
     },
-    autoInvokeClaude: true,
-    claudeModel: 'sonnet'
+    autoInvokeClaude: false
   };
 
   fs.writeFileSync('./smaug.config.json', JSON.stringify(config, null, 2) + '\n');
@@ -185,12 +188,13 @@ This will set up Smaug to automatically archive your Twitter bookmarks.
 🐉 Setup Complete!
 ━━━━━━━━━━━━━━━━━━━━━
 
-Your bookmarks will be saved to: ./bookmarks.md
+Your bookmarks will be saved to: ./bookmarks/
+Each tweet gets its own markdown file with media.
 
 Commands:
-  npx smaug run    Run full job (fetch + process with Claude)
-  npx smaug fetch  Fetch new bookmarks
-  npx smaug status Check status
+  npx smaug fetch    Fetch new bookmarks
+  npx smaug process  Process pending to individual files
+  npx smaug status   Check status
 
 Happy hoarding! 🐉
 `);
@@ -237,7 +241,6 @@ async function main() {
       const count = parseInt(args.find(a => a.match(/^\d+$/)) || '20', 10);
       const specificIds = args.filter(a => a.match(/^\d{10,}$/));
       const force = args.includes('--force') || args.includes('-f');
-      const includeMedia = args.includes('--media') || args.includes('-m');
       const fetchAll = args.includes('--all') || args.includes('-a') || args.includes('-all');
 
       // Parse --source flag
@@ -253,17 +256,16 @@ async function main() {
 
       // Parse --max-pages flag
       const maxPagesIdx = args.findIndex(a => a === '--max-pages');
-      let maxPages = null;
-      if (maxPagesIdx !== -1 && args[maxPagesIdx + 1]) {
-        maxPages = parseInt(args[maxPagesIdx + 1], 10);
-      }
+      const maxPages = maxPagesIdx !== -1 && args[maxPagesIdx + 1]
+        ? parseInt(args[maxPagesIdx + 1], 10)
+        : null;
 
       const result = await fetchAndPrepareBookmarks({
         count,
         specificIds: specificIds.length > 0 ? specificIds : null,
         force,
         source,
-        includeMedia,
+        includeMedia: true,
         all: fetchAll,
         maxPages
       });
@@ -279,30 +281,41 @@ async function main() {
     }
 
     case 'process': {
-      const config = loadConfig();
+      const dryRun = args.includes('--dry-run') || args.includes('-n');
 
-      if (!fs.existsSync(config.pendingFile)) {
-        console.log('No pending bookmarks. Run `smaug fetch` first.');
-        process.exit(0);
-      }
+      if (dryRun) {
+        // Show pending without processing
+        const config = loadConfig();
 
-      const pending = JSON.parse(fs.readFileSync(config.pendingFile, 'utf8'));
+        if (!fs.existsSync(config.pendingFile)) {
+          console.log('No pending bookmarks. Run `smaug fetch` first.');
+          process.exit(0);
+        }
 
-      if (pending.bookmarks.length === 0) {
-        console.log('No pending bookmarks to process.');
-        process.exit(0);
-      }
+        const pending = JSON.parse(fs.readFileSync(config.pendingFile, 'utf8'));
 
-      console.log(`Found ${pending.bookmarks.length} pending bookmarks.\n`);
-      console.log('To process them:');
-      console.log('  npx smaug run\n');
+        if (pending.bookmarks.length === 0) {
+          console.log('No pending bookmarks to process.');
+          process.exit(0);
+        }
 
-      console.log('Pending:');
-      for (const b of pending.bookmarks.slice(0, 5)) {
-        console.log(`  • @${b.author}: ${b.text.slice(0, 50)}...`);
-      }
-      if (pending.bookmarks.length > 5) {
-        console.log(`  ... and ${pending.bookmarks.length - 5} more`);
+        console.log(`Found ${pending.bookmarks.length} pending bookmarks:\n`);
+        for (const b of pending.bookmarks.slice(0, 10)) {
+          console.log(`  - @${b.author}: ${b.text.slice(0, 50)}...`);
+        }
+        if (pending.bookmarks.length > 10) {
+          console.log(`  ... and ${pending.bookmarks.length - 10} more`);
+        }
+        console.log('\nRun `smaug process` (without --dry-run) to process them.');
+      } else {
+        // Actually process bookmarks to individual files
+        const result = await processAllBookmarks();
+
+        if (result.processed === 0 && result.skipped === 0 && result.failed === 0) {
+          console.log('\nNo bookmarks to process. Run `smaug fetch` first.');
+        } else {
+          console.log(`\nDone! Files saved to: ./bookmarks/`);
+        }
       }
       break;
     }
@@ -311,11 +324,12 @@ async function main() {
       const config = loadConfig();
 
       console.log('Smaug Status\n');
-      console.log(`Archive:     ${config.archiveFile}`);
+      console.log(`Bookmarks:   ${config.bookmarksDir}`);
+      console.log(`Media:       ${config.mediaDir}`);
+      console.log(`Download:    ${config.downloadMedia ? '✓ enabled' : 'disabled'}`);
+      console.log(`Threads:     ${config.expandThreads ? '✓ expand same-author' : 'disabled'}`);
       console.log(`Source:      ${config.source || 'bookmarks'}`);
-      console.log(`Media:       ${config.includeMedia ? '✓ enabled (experimental)' : 'disabled (use --media to enable)'}`);
       console.log(`Twitter:     ${config.twitter?.authToken ? '✓ configured' : '✗ not configured'}`);
-      console.log(`Auto-Claude: ${config.autoInvokeClaude ? 'enabled' : 'disabled'}`);
 
       if (fs.existsSync(config.pendingFile)) {
         const pending = JSON.parse(fs.readFileSync(config.pendingFile, 'utf8'));
@@ -329,10 +343,14 @@ async function main() {
         console.log(`Last fetch:  ${state.last_check || 'never'}`);
       }
 
-      if (fs.existsSync(config.archiveFile)) {
-        const content = fs.readFileSync(config.archiveFile, 'utf8');
-        const entryCount = (content.match(/^## @/gm) || []).length;
-        console.log(`Archived:    ${entryCount} bookmarks`);
+      // Count archived bookmark files
+      const bookmarkFiles = getExistingBookmarkFiles(config);
+      console.log(`Archived:    ${bookmarkFiles.length} bookmark files`);
+
+      // Count media files
+      if (fs.existsSync(config.mediaDir)) {
+        const mediaFiles = fs.readdirSync(config.mediaDir).filter(f => !f.startsWith('.'));
+        console.log(`Media files: ${mediaFiles.length}`);
       }
       break;
     }
@@ -344,37 +362,41 @@ async function main() {
       console.log(`
 🐉 Smaug - Twitter Bookmarks & Likes Archiver
 
+Each bookmark is saved as an individual markdown file with:
+  - Full thread context (same-author threads expanded)
+  - Downloaded media (images, GIFs, video thumbnails)
+  - Obsidian-compatible ![[embed]] syntax
+
 Commands:
   setup          Interactive setup wizard (start here!)
-  run            Run the full job (fetch + process with Claude)
-  run -t         Run with token usage tracking (--track-tokens)
-  run --limit N  Process only N bookmarks (for large backlogs)
   fetch [n]      Fetch n tweets (default: 20)
   fetch --all    Fetch ALL bookmarks (paginated)
-  fetch --max-pages N  Limit pagination to N pages (default: 10)
-  fetch --force  Re-fetch even if already archived
   fetch --source <source>  Fetch from: bookmarks, likes, or both
-  fetch --media  EXPERIMENTAL: Include media attachments
-  process        Show pending tweets
+  fetch --force  Re-fetch even if already archived
+  process        Process pending bookmarks to individual files
+  process -n     Dry run - show pending without processing
   status         Show current status
 
 Examples:
   smaug setup                    # First-time setup
-  smaug run                      # Run full automation
-  smaug run --limit 50           # Process 50 bookmarks at a time
-  smaug fetch                    # Fetch latest (uses config source)
+  smaug fetch                    # Fetch latest bookmarks
   smaug fetch 50                 # Fetch 50 tweets
   smaug fetch --all              # Fetch ALL bookmarks (paginated)
-  smaug fetch --all --max-pages 5  # Fetch up to 5 pages
   smaug fetch --source likes     # Fetch from likes only
-  smaug fetch --source both      # Fetch from bookmarks AND likes
-  smaug fetch --media            # Include photos/videos/GIFs (experimental)
-  smaug fetch --force            # Re-process archived tweets
+  smaug process                  # Process to ./bookmarks/
+  smaug process -n               # Preview what would be processed
+
+Output:
+  bookmarks/
+    20260111143022_author.md     # Individual tweet files
+    media/
+      20260111143022_author_1.jpg  # Downloaded media
 
 Config (smaug.config.json):
-  "source": "bookmarks"    Default source (bookmarks, likes, or both)
-  "includeMedia": false    EXPERIMENTAL: Include media (default: off)
-  "folders": {}            Map folder IDs to tags (see README)
+  "bookmarksDir": "./bookmarks"     Output directory
+  "downloadMedia": true             Download images/GIFs
+  "expandThreads": true             Fetch full threads
+  "source": "bookmarks"             Default source
 
 More info: https://github.com/alexknowshtml/smaug
 `);

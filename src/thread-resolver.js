@@ -1,0 +1,180 @@
+/**
+ * Thread Resolver - Fetches and classifies tweet threads
+ *
+ * Handles:
+ * - Same-author threads (traverse up and down)
+ * - Multi-author conversations (traverse up only)
+ * - Standalone tweets
+ */
+
+import { execSync } from 'child_process';
+import fs from 'fs';
+import path from 'path';
+import os from 'os';
+import { getAuthor, buildBirdEnv } from './utils.js';
+
+/**
+ * Fetch a single tweet by ID
+ */
+export function fetchTweet(config, tweetId) {
+  try {
+    const env = buildBirdEnv(config);
+    const birdCmd = config.birdPath || 'bird';
+    const tmpFile = path.join(os.tmpdir(), `smaug-tweet-${tweetId}-${Date.now()}.json`);
+
+    execSync(`${birdCmd} read ${tweetId} --json > "${tmpFile}"`, {
+      timeout: 15000,
+      env,
+      shell: true
+    });
+
+    const output = fs.readFileSync(tmpFile, 'utf8');
+    fs.unlinkSync(tmpFile);
+    return JSON.parse(output);
+  } catch (error) {
+    console.log(`  Could not fetch tweet ${tweetId}: ${error.message}`);
+    return null;
+  }
+}
+
+/**
+ * Fetch full thread using bird thread command
+ */
+export function fetchThread(config, tweetId) {
+  try {
+    const env = buildBirdEnv(config);
+    const birdCmd = config.birdPath || 'bird';
+    const tmpFile = path.join(os.tmpdir(), `smaug-thread-${tweetId}-${Date.now()}.json`);
+
+    execSync(`${birdCmd} thread ${tweetId} --json > "${tmpFile}"`, {
+      timeout: 60000,
+      env,
+      shell: true
+    });
+
+    const output = fs.readFileSync(tmpFile, 'utf8');
+    fs.unlinkSync(tmpFile);
+    const parsed = JSON.parse(output);
+    return Array.isArray(parsed) ? parsed : (parsed.tweets || [parsed]);
+  } catch (error) {
+    console.log(`  Could not fetch thread for ${tweetId}: ${error.message}`);
+    return null;
+  }
+}
+
+/**
+ * Classify a tweet's thread type based on its parent
+ * @returns 'standalone' | 'thread' | 'conversation'
+ */
+export function classifyTweet(tweet, parentTweet) {
+  if (!tweet.inReplyToStatusId) {
+    return 'standalone';
+  }
+
+  if (!parentTweet) {
+    return 'standalone';
+  }
+
+  const tweetAuthor = getAuthor(tweet);
+  const parentAuthor = getAuthor(parentTweet);
+
+  return tweetAuthor === parentAuthor ? 'thread' : 'conversation';
+}
+
+/**
+ * Walk up the reply chain to find the root tweet
+ * Returns array of tweets from root to current (inclusive)
+ */
+export function findAncestorChain(tweet, config, maxDepth = 50) {
+  const chain = [tweet];
+  let current = tweet;
+  let depth = 0;
+
+  while (current.inReplyToStatusId && depth < maxDepth) {
+    const parent = fetchTweet(config, current.inReplyToStatusId);
+    if (!parent) break;
+
+    chain.unshift(parent);
+    current = parent;
+    depth++;
+  }
+
+  return chain;
+}
+
+/**
+ * Determine if the ancestor chain is a same-author thread
+ */
+function isSameAuthorThread(chain) {
+  if (chain.length <= 1) return false;
+
+  const firstAuthor = getAuthor(chain[0]);
+  return chain.every(tweet => getAuthor(tweet) === firstAuthor);
+}
+
+/**
+ * Resolve complete thread context for a bookmark
+ *
+ * For same-author threads: returns all tweets in the thread
+ * For conversations: returns ancestor chain only (up to bookmarked tweet)
+ * For standalone: returns just the tweet
+ */
+export function resolveThread(bookmark, config) {
+  const expandThreads = config.expandThreads !== false;
+  const maxDepth = config.maxThreadDepth || 50;
+
+  // If no reply, it's standalone
+  if (!bookmark.inReplyToStatusId) {
+    return {
+      type: 'standalone',
+      tweets: [bookmark],
+      rootTweet: bookmark
+    };
+  }
+
+  // Walk up to find ancestor chain
+  const ancestorChain = findAncestorChain(bookmark, config, maxDepth);
+  const rootTweet = ancestorChain[0];
+
+  // Determine if this is a same-author thread or conversation
+  const isSameAuthor = isSameAuthorThread(ancestorChain);
+
+  if (isSameAuthor && expandThreads) {
+    // For same-author threads, fetch the full thread from root
+    const fullThread = fetchThread(config, rootTweet.id);
+
+    if (fullThread && fullThread.length > 0) {
+      // Filter to only same-author tweets
+      const authorUsername = getAuthor(rootTweet);
+      const filteredThread = fullThread.filter(t => getAuthor(t) === authorUsername);
+
+      return {
+        type: 'thread',
+        tweets: filteredThread.length > 0 ? filteredThread : ancestorChain,
+        rootTweet: filteredThread[0] || rootTweet
+      };
+    }
+
+    // Fallback to ancestor chain if thread fetch fails
+    return {
+      type: 'thread',
+      tweets: ancestorChain,
+      rootTweet
+    };
+  }
+
+  // For conversations (multi-author), just return the ancestor chain
+  return {
+    type: 'conversation',
+    tweets: ancestorChain,
+    rootTweet
+  };
+}
+
+/**
+ * Get the primary tweet (the one that was bookmarked) from thread data
+ */
+export function getBookmarkedTweet(threadData, bookmarkId) {
+  return threadData.tweets.find(t => t.id === bookmarkId) ||
+         threadData.tweets[threadData.tweets.length - 1];
+}
