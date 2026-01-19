@@ -322,6 +322,7 @@ async function main() {
 
     case 'status': {
       const config = loadConfig();
+      const verbose = args.includes('-v') || args.includes('--verbose');
 
       console.log('Smaug Status\n');
       console.log(`Bookmarks:   ${config.bookmarksDir}`);
@@ -352,6 +353,46 @@ async function main() {
         const mediaFiles = fs.readdirSync(config.mediaDir).filter(f => !f.startsWith('.'));
         console.log(`Media files: ${mediaFiles.length}`);
       }
+
+      // Show folder breakdown
+      const folders = config.folders || {};
+      if (Object.keys(folders).length > 0 && bookmarkFiles.length > 0) {
+        console.log(`\nConfigured folders: ${Object.keys(folders).length}`);
+
+        if (verbose) {
+          // Count bookmarks per tag by reading frontmatter
+          const tagCounts = {};
+          let untagged = 0;
+
+          for (const file of bookmarkFiles) {
+            try {
+              const content = fs.readFileSync(file, 'utf8');
+              const tagsMatch = content.match(/^tags:\s*\[([^\]]*)\]/m);
+              if (tagsMatch && tagsMatch[1].trim()) {
+                const tags = tagsMatch[1].split(',').map(t => t.trim());
+                for (const tag of tags) {
+                  tagCounts[tag] = (tagCounts[tag] || 0) + 1;
+                }
+              } else {
+                untagged++;
+              }
+            } catch (e) {
+              // Skip files that can't be read
+            }
+          }
+
+          console.log('\nBookmarks by folder:');
+          for (const [folderId, folderName] of Object.entries(folders)) {
+            const count = tagCounts[folderName] || 0;
+            console.log(`  ${folderName}: ${count}`);
+          }
+          if (untagged > 0) {
+            console.log(`  (untagged): ${untagged}`);
+          }
+        } else {
+          console.log('  (use -v for per-folder breakdown)');
+        }
+      }
       break;
     }
 
@@ -376,6 +417,7 @@ Commands:
   process        Process pending bookmarks to individual files
   process -n     Dry run - show pending without processing
   status         Show current status
+  status -v      Show per-folder breakdown
 
 Examples:
   smaug setup                    # First-time setup

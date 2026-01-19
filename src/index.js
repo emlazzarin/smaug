@@ -44,6 +44,15 @@ export {
   generateBookmarkFilename
 } from './markdown-writer.js';
 
+// Article clipping
+export {
+  clipArticle,
+  clipArticlesFromBookmark,
+  extractArticle,
+  isClippableArticle,
+  generateClippingFilename
+} from './article-clipper.js';
+
 // Configuration
 export { loadConfig, initConfig } from './config.js';
 

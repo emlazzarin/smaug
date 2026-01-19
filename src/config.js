@@ -22,6 +22,12 @@ const DEFAULT_CONFIG = {
   // Directory for downloaded media files
   mediaDir: './bookmarks/media',
 
+  // Directory for article clippings
+  clippingsDir: './clippings',
+
+  // Clip articles from links (uses Defuddle for extraction)
+  clipArticles: true,
+
   // Download media files (images, GIFs; thumbnails for videos)
   downloadMedia: true,
 

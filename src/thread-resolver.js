@@ -117,13 +117,42 @@ function isSameAuthorThread(chain) {
  *
  * For same-author threads: returns all tweets in the thread
  * For conversations: returns ancestor chain only (up to bookmarked tweet)
- * For standalone: returns just the tweet
+ * For standalone: returns just the tweet (or thread if it's a thread root)
  */
 export function resolveThread(bookmark, config) {
   const expandThreads = config.expandThreads !== false;
   const maxDepth = config.maxThreadDepth || 50;
+  const bookmarkAuthor = getAuthor(bookmark);
 
-  // If no reply, it's standalone
+  // Always try to fetch the full thread context using bird thread
+  // This catches both:
+  // 1. Threads where we bookmarked a reply (has ancestors)
+  // 2. Threads where we bookmarked the root (has descendants)
+  if (expandThreads) {
+    const fullThread = fetchThread(config, bookmark.id);
+
+    if (fullThread && fullThread.length > 1) {
+      // Filter to only same-author tweets
+      const sameAuthorTweets = fullThread.filter(t => getAuthor(t) === bookmarkAuthor);
+
+      if (sameAuthorTweets.length > 1) {
+        // Sort by date (oldest first for now, will be reversed in markdown-writer)
+        sameAuthorTweets.sort((a, b) => {
+          const dateA = new Date(a.createdAt).getTime();
+          const dateB = new Date(b.createdAt).getTime();
+          return dateA - dateB;
+        });
+
+        return {
+          type: 'thread',
+          tweets: sameAuthorTweets,
+          rootTweet: sameAuthorTweets[0]
+        };
+      }
+    }
+  }
+
+  // If no reply and no thread found, it's standalone
   if (!bookmark.inReplyToStatusId) {
     return {
       type: 'standalone',
@@ -132,30 +161,14 @@ export function resolveThread(bookmark, config) {
     };
   }
 
-  // Walk up to find ancestor chain
+  // Walk up to find ancestor chain (for conversations with other authors)
   const ancestorChain = findAncestorChain(bookmark, config, maxDepth);
   const rootTweet = ancestorChain[0];
 
   // Determine if this is a same-author thread or conversation
   const isSameAuthor = isSameAuthorThread(ancestorChain);
 
-  if (isSameAuthor && expandThreads) {
-    // For same-author threads, fetch the full thread from root
-    const fullThread = fetchThread(config, rootTweet.id);
-
-    if (fullThread && fullThread.length > 0) {
-      // Filter to only same-author tweets
-      const authorUsername = getAuthor(rootTweet);
-      const filteredThread = fullThread.filter(t => getAuthor(t) === authorUsername);
-
-      return {
-        type: 'thread',
-        tweets: filteredThread.length > 0 ? filteredThread : ancestorChain,
-        rootTweet: filteredThread[0] || rootTweet
-      };
-    }
-
-    // Fallback to ancestor chain if thread fetch fails
+  if (isSameAuthor) {
     return {
       type: 'thread',
       tweets: ancestorChain,
@@ -163,7 +176,7 @@ export function resolveThread(bookmark, config) {
     };
   }
 
-  // For conversations (multi-author), just return the ancestor chain
+  // For conversations (multi-author), return the ancestor chain
   return {
     type: 'conversation',
     tweets: ancestorChain,

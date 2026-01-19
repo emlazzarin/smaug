@@ -21,6 +21,7 @@ import { loadConfig } from './config.js';
 import { resolveThread } from './thread-resolver.js';
 import { downloadThreadMedia, getMediaStats } from './media-downloader.js';
 import { writeBookmarkFile, bookmarkFileExists } from './markdown-writer.js';
+import { clipArticlesFromBookmark } from './article-clipper.js';
 import { buildBirdEnv } from './utils.js';
 
 dayjs.extend(utc);
@@ -74,7 +75,7 @@ export function fetchBookmarks(config, count = 10, options = {}) {
     let cmd;
     if (useAll) {
       // Paginated fetch - use longer timeout
-      const maxPages = options.maxPages || 10; // Limit pages to prevent runaway
+      const maxPages = options.maxPages || 100; // Default to 100 pages (~5000-7000 bookmarks)
       cmd = folderId
         ? `${birdCmd} bookmarks --folder-id ${folderId} --all --max-pages ${maxPages} --json`
         : `${birdCmd} bookmarks --all --max-pages ${maxPages} --json`;
@@ -167,8 +168,7 @@ export function fetchFromFolders(config, count = 10, options = {}) {
 
   console.log(`Fetching from ${folderIds.length} configured folder(s)...`);
 
-  const allBookmarks = [];
-  const seen = new Set();
+  const bookmarkMap = new Map(); // Track bookmarks by ID to merge tags
 
   for (const folderId of folderIds) {
     const folderTag = folders[folderId];
@@ -177,25 +177,33 @@ export function fetchFromFolders(config, count = 10, options = {}) {
     try {
       const bookmarks = fetchBookmarks(config, count, { ...options, folderId });
       let added = 0;
+      let merged = 0;
 
       for (const bookmark of bookmarks) {
-        if (!seen.has(bookmark.id)) {
-          seen.add(bookmark.id);
-          // Add folder tag to the bookmark
-          bookmark._folderTag = folderTag;
+        if (bookmarkMap.has(bookmark.id)) {
+          // Bookmark already seen - merge tags
+          const existing = bookmarkMap.get(bookmark.id);
+          if (!existing._folderTags.includes(folderTag)) {
+            existing._folderTags.push(folderTag);
+            merged++;
+          }
+        } else {
+          // New bookmark - initialize with array of tags
+          bookmark._folderTags = [folderTag];
           bookmark._folderId = folderId;
-          allBookmarks.push(bookmark);
+          bookmarkMap.set(bookmark.id, bookmark);
           added++;
         }
       }
 
-      console.log(`  Found ${bookmarks.length} bookmarks, ${added} new`);
+      const mergeNote = merged > 0 ? `, ${merged} in multiple folders` : '';
+      console.log(`  Found ${bookmarks.length} bookmarks, ${added} unique${mergeNote}`);
     } catch (error) {
       console.error(`  Error fetching folder ${folderId}: ${error.message}`);
     }
   }
 
-  return allBookmarks;
+  return Array.from(bookmarkMap.values());
 }
 
 export function fetchTweet(config, tweetId) {
@@ -430,7 +438,26 @@ export async function fetchAndPrepareBookmarks(options = {}) {
   if (hasFolders && source === 'bookmarks') {
     // Fetch from each configured folder with tags
     console.log(`Fetching from ${Object.keys(config.folders).length} folder(s)${includeMedia ? ' (with media)' : ''}`);
-    tweets = fetchFromFolders(configWithOptions, count, fetchOptions);
+    const folderBookmarks = fetchFromFolders(configWithOptions, count, fetchOptions);
+
+    // Also fetch all bookmarks to catch ones not in configured folders
+    console.log(`\nFetching all bookmarks to catch unfiled ones...`);
+    const allBookmarks = fetchBookmarks(configWithOptions, count, fetchOptions);
+
+    // Merge: folder bookmarks take priority (they have tags)
+    const seen = new Set(folderBookmarks.map(b => b.id));
+    let unfiled = 0;
+    for (const bookmark of allBookmarks) {
+      if (!seen.has(bookmark.id)) {
+        bookmark._folderTags = []; // No folder tags
+        folderBookmarks.push(bookmark);
+        unfiled++;
+      }
+    }
+    if (unfiled > 0) {
+      console.log(`  Found ${unfiled} bookmarks not in any configured folder`);
+    }
+    tweets = folderBookmarks;
   } else {
     // Normal fetch from source
     console.log(`Fetching from source: ${source}${includeMedia ? ' (with media)' : ''}${fetchOptions.all ? ' (paginated)' : ''}`);
@@ -567,9 +594,10 @@ export async function fetchAndPrepareBookmarks(options = {}) {
       // Only included if includeMedia is true (--media flag)
       const media = configWithOptions.includeMedia ? (bookmark.media || []) : [];
 
-      // Build tags array from folder tag (if present)
-      const tags = [];
-      if (bookmark._folderTag) {
+      // Build tags array from folder tags (supports multiple folders)
+      const tags = bookmark._folderTags || [];
+      // Legacy support for single tag
+      if (bookmark._folderTag && !tags.includes(bookmark._folderTag)) {
         tags.push(bookmark._folderTag);
       }
 
@@ -671,9 +699,23 @@ export async function processBookmarkToFile(bookmark, config) {
     }
   }
 
-  // 3. Write individual markdown file
+  // 3. Clip articles (if enabled)
+  let clippingResults = [];
+  if (config.clipArticles !== false) {
+    const articleLinks = (bookmark.links || []).filter(l => l.type === 'article');
+    if (articleLinks.length > 0) {
+      console.log(`  Clipping ${articleLinks.length} article(s)...`);
+      clippingResults = await clipArticlesFromBookmark(bookmark, config);
+      const clipped = clippingResults.filter(c => c.success).length;
+      if (clipped > 0) {
+        console.log(`  Clipped: ${clipped}/${articleLinks.length} articles`);
+      }
+    }
+  }
+
+  // 4. Write individual markdown file
   console.log(`  Writing markdown file...`);
-  const fileResult = writeBookmarkFile(bookmark, threadData, mediaResults, config);
+  const fileResult = writeBookmarkFile(bookmark, threadData, mediaResults, clippingResults, config);
   console.log(`  Created: ${fileResult.filename}`);
 
   return {
@@ -684,6 +726,7 @@ export async function processBookmarkToFile(bookmark, config) {
     threadLength: threadData.tweets.length,
     mediaDownloaded: mediaResults.filter(m => m.success).length,
     mediaFailed: mediaResults.filter(m => !m.success).length,
+    articlesClipped: clippingResults.filter(c => c.success).length,
     outputFile: fileResult.filename
   };
 }
