@@ -4,6 +4,8 @@ Archive your Twitter/X bookmarks to individual markdown files with media and ful
 
 *Like a dragon hoarding treasure, Smaug collects the valuable things you bookmark.*
 
+> **Multi-model support:** Smaug works with [Claude Code](https://docs.anthropic.com/en/docs/claude-code) (default) and [OpenCode](https://github.com/anomalyco/opencode), giving you access to a wide range of AI models. Results may vary depending on the model you choose — test carefully and find what works best for your workflow. See [AI CLI Integration](#ai-cli-integration) for setup details.
+
 ## Contents
 
 - [Quick Start](#quick-start)
@@ -12,9 +14,12 @@ Archive your Twitter/X bookmarks to individual markdown files with media and ful
 - [Output](#output)
 - [Configuration](#configuration)
 - [Getting Twitter Credentials](#getting-twitter-credentials)
+- [What Smaug Actually Does](#what-smaug-actually-does)
 - [Install Globally](#install-globally)
 - [Bookmark Folders](#bookmark-folders)
 - [Automation](#automation)
+- [Categories](#categories)
+- [AI CLI Integration](#ai-cli-integration)
 - [Troubleshooting](#troubleshooting)
 - [Credits](#credits)
 
@@ -200,6 +205,19 @@ Smaug uses the bird CLI which needs your Twitter session cookies.
 
 > **Note:** `smaug.config.json` is gitignored to prevent accidentally committing credentials.
 
+## What Smaug Actually Does
+
+1. **Fetches bookmarks** from Twitter/X using the bird CLI (can also fetch likes, or both)
+2. **Expands t.co links** to reveal actual URLs
+3. **Extracts content** from linked pages:
+   - GitHub repos (via API: stars, description, README)
+   - External articles (title, author, content)
+   - X/Twitter long-form articles (full content via bird CLI)
+   - Quote tweets and reply threads (full context)
+4. **Invokes Claude Code** to analyze and categorize each tweet
+5. **Saves to markdown** organized by date with rich context
+6. **Files to knowledge library** - GitHub repos to `knowledge/tools/`, articles to `knowledge/articles/`
+
 ## Install Globally
 
 To use `smaug` without `npx`:
@@ -218,6 +236,83 @@ Or for development (changes reflect immediately):
 ```bash
 npm link
 ```
+
+**Note:** This requires bird CLI built from git (not the npm release). See [Troubleshooting](#troubleshooting) for installation instructions.
+
+**Cost warning:** Processing large bookmark backlogs can consume significant Claude tokens. Each bookmark with content-heavy links (long articles, GitHub READMEs, etc.) adds to the context. Process in batches to control costs:
+
+```bash
+npx smaug run --limit 50 -t    # Process 50 at a time with token tracking
+```
+
+Use the `-t` flag to monitor usage. See [Token Usage Tracking](#token-usage-tracking) for cost estimates by model.
+
+## Categories
+
+Categories define how different bookmark types are handled. Smaug comes with sensible defaults, but you can customize them in `smaug.config.json`.
+
+### Default Categories
+
+| Category | Matches | Action | Destination |
+|----------|---------|--------|-------------|
+| **github** | github.com | file | `./knowledge/tools/` |
+| **article** | medium.com, substack.com, dev.to, blogs | file | `./knowledge/articles/` |
+| **x-article** | x.com/i/article/* | file | `./knowledge/articles/` |
+| **tweet** | (fallback) | capture | bookmarks.md only |
+
+🔜 _Note: Transcription is flagged but not yet automated. PRs welcome!_
+
+### X/Twitter Long-Form Articles
+
+X articles (`x.com/i/article/*`) are Twitter's native long-form content format. Smaug extracts the full article text using bird CLI:
+
+1. **Direct extraction**: If the bookmarked tweet is the article author's original post, content is extracted directly
+2. **Search fallback**: If you bookmark someone sharing/quoting an article, Smaug searches for the original author's tweet and extracts the full content from there
+3. **Metadata fallback**: If search fails, basic metadata (title, description) is captured
+
+Example X article bookmark:
+```markdown
+## @joaomdmoura - Lessons From 2 Billion Agentic Workflows
+> [Full article content extracted]
+
+- **Tweet:** https://x.com/joaomdmoura/status/123456789
+- **Link:** https://x.com/i/article/987654321
+- **Filed:** [lessons-from-2-billion-agentic-workflows.md](./knowledge/articles/lessons-from-2-billion-agentic-workflows.md)
+- **What:** Deep dive into patterns from scaling CrewAI to billions of agent executions.
+```
+
+### Actions
+
+- **file**: Create a separate markdown file with rich metadata
+- **capture**: Add to bookmarks.md only (no separate file)
+- **transcribe**: Flag for future transcription *(auto-transcription coming soon! PRs welcome)*
+
+### Custom Categories
+
+Add your own categories in `smaug.config.json`:
+
+```json
+{
+  "categories": {
+    "research": {
+      "match": ["arxiv.org", "papers.", "scholar.google"],
+      "action": "file",
+      "folder": "./knowledge/research",
+      "template": "article",
+      "description": "Academic papers"
+    },
+    "newsletter": {
+      "match": ["buttondown.email", "beehiiv.com"],
+      "action": "file",
+      "folder": "./knowledge/newsletters",
+      "template": "article",
+      "description": "Newsletter issues"
+    }
+  }
+}
+```
+
+Your custom categories merge with the defaults. To override a default, use the same key (e.g., `github`, `article`).
 
 ## Bookmark Folders
 
@@ -256,6 +351,228 @@ crontab -e
 # Add:
 */30 * * * * cd /path/to/smaug && smaug fetch --all && smaug process >> smaug.log 2>&1
 ```
+
+### Option C: systemd
+
+```bash
+# Create /etc/systemd/system/smaug.service
+# See docs/systemd-setup.md for details
+```
+
+## Output
+
+### bookmarks.md
+
+Your bookmarks organized by date:
+
+```markdown
+# Thursday, January 2, 2026
+
+## @simonw - Gist Host Fork for Rendering GitHub Gists
+> I forked the wonderful gistpreview.github.io to create gisthost.github.io
+
+- **Tweet:** https://x.com/simonw/status/123456789
+- **Link:** https://gisthost.github.io/
+- **Filed:** [gisthost-gist-rendering.md](./knowledge/articles/gisthost-gist-rendering.md)
+- **What:** Free GitHub Pages-hosted tool that renders HTML files from Gists.
+
+---
+
+## @tom_doerr - Whisper-Flow Real-time Transcription
+> This is amazing - real-time transcription with Whisper
+
+- **Tweet:** https://x.com/tom_doerr/status/987654321
+- **Link:** https://github.com/dimastatz/whisper-flow
+- **Filed:** [whisper-flow.md](./knowledge/tools/whisper-flow.md)
+- **What:** Real-time speech-to-text using OpenAI Whisper with streaming support.
+```
+
+### knowledge/tools/*.md
+
+GitHub repos get their own files:
+
+```markdown
+---
+title: "whisper-flow"
+type: tool
+date_added: 2026-01-02
+source: "https://github.com/dimastatz/whisper-flow"
+tags: [ai, transcription, whisper, streaming]
+via: "Twitter bookmark from @tom_doerr"
+---
+
+Real-time speech-to-text transcription using OpenAI Whisper...
+
+## Key Features
+- Streaming audio input
+- Multiple language support
+- Low latency output
+
+## Links
+- [GitHub](https://github.com/dimastatz/whisper-flow)
+- [Original Tweet](https://x.com/tom_doerr/status/987654321)
+```
+
+## Configuration
+
+Copy the example config and customize:
+
+```bash
+cp smaug.config.example.json smaug.config.json
+```
+
+Example `smaug.config.json`:
+
+```json
+{
+  "source": "bookmarks",
+  "archiveFile": "./bookmarks.md",
+  "pendingFile": "./.state/pending-bookmarks.json",
+  "stateFile": "./.state/bookmarks-state.json",
+  "timezone": "America/New_York",
+  "twitter": {
+    "authToken": "your_auth_token",
+    "ct0": "your_ct0"
+  },
+  "autoInvokeClaude": true,
+  "claudeModel": "sonnet",
+  "claudeTimeout": 900000,
+  "allowedTools": "Read,Write,Edit,Glob,Grep,Bash,Task,TodoWrite",
+  "webhookUrl": null,
+  "webhookType": "discord"
+}
+```
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `source` | `bookmarks` | What to fetch: `bookmarks` (default), `likes`, or `both` |
+| `includeMedia` | `false` | **EXPERIMENTAL**: Include media attachments (photos, videos, GIFs) |
+| `archiveFile` | `./bookmarks.md` | Main archive file |
+| `timezone` | `America/New_York` | For date formatting |
+| `cliTool` | `claude` | AI CLI to use: `claude` or `opencode` |
+| `autoInvokeClaude` | `true` | Auto-run Claude Code for analysis |
+| `claudeModel` | `sonnet` | Model to use (`sonnet`, `haiku`, or `opus`) |
+| `autoInvokeOpencode` | `true` | Auto-run OpenCode for analysis |
+| `opencodeModel` | `opencode/glm-4.7-free` | OpenCode model (see OpenCode docs) |
+| `claudeTimeout` | `900000` | Max processing time (15 min) |
+| `parallelThreshold` | `8` | Min bookmarks before parallel processing kicks in |
+| `webhookUrl` | `null` | Discord/Slack webhook for notifications |
+
+Environment variables also work: `AUTH_TOKEN`, `CT0`, `SOURCE`, `INCLUDE_MEDIA`, `ARCHIVE_FILE`, `TIMEZONE`, `CLI_TOOL`, `CLAUDE_MODEL`, `OPENCODE_MODEL`, etc.
+
+### Experimental: Media Attachments
+
+Media extraction (photos, videos, GIFs) is available but disabled by default. To enable:
+
+```bash
+# One-time with flag
+npx smaug fetch --media
+
+# Or in config
+{
+  "includeMedia": true
+}
+```
+
+When enabled, the `media[]` array is included in the pending JSON with:
+- `type`: "photo", "video", or "animated_gif"
+- `url`: Full-size media URL
+- `previewUrl`: Thumbnail (smaller, faster)
+- `width`, `height`: Dimensions
+- `videoUrl`, `durationMs`: For videos only
+
+⚠️ **Why experimental?**
+1. **Requires bird with media support** - PR [#14](https://github.com/steipete/bird/pull/14) adds media extraction. Until merged, you'll need a fork with this PR or wait for an upstream release. Without it, `--media` is a no-op (empty array).
+2. **Workflow still being refined** - Short screengrabs (< 30s) don't need transcripts, but longer videos might. We're still figuring out the best handling.
+
+## AI CLI Integration
+
+Smaug supports multiple AI CLI tools for intelligent bookmark processing:
+
+- **Claude Code** (default) - Anthropic's Claude CLI
+- **OpenCode** - Alternative AI CLI with support for multiple models
+
+### Using OpenCode (Alternative to Claude)
+
+To use OpenCode instead of Claude Code:
+
+```json
+{
+  "cliTool": "opencode",
+  "opencodeModel": "opencode/glm-4.7-free",
+  "autoInvokeOpencode": true
+}
+```
+
+Available OpenCode models include:
+- `opencode/glm-4.7-free` (free tier)
+- `opencode/kimi-k2.5-free` (free tier)
+- `opencode/claude-sonnet-4-5` (Claude via OpenCode)
+- `opencode/gpt-5.2` (GPT via OpenCode)
+
+Set via environment variable:
+```bash
+export CLI_TOOL=opencode
+export OPENCODE_MODEL=opencode/kimi-k2.5-free
+```
+
+### Claude Code Integration
+
+Smaug uses Claude Code by default for intelligent bookmark processing. The `.claude/commands/process-bookmarks.md` file contains instructions for:
+
+- Generating descriptive titles (not generic "Article" or "Tweet")
+- Filing GitHub repos to `knowledge/tools/`
+- Filing articles to `knowledge/articles/`
+- Handling quote tweets with full context
+- Processing reply threads with parent context
+- Parallel processing for large batches (configurable threshold, default 8 bookmarks)
+
+You can also run processing manually:
+
+```bash
+claude
+> Run /process-bookmarks
+```
+
+### Token Usage Tracking
+
+Track your API costs with the `-t` flag:
+
+```bash
+npx smaug run -t
+# or
+npx smaug run --track-tokens
+```
+
+This displays a breakdown at the end of each run:
+
+```
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+📊 TOKEN USAGE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Main (sonnet):
+  Input:               85 tokens  <$0.01
+  Output:           5,327 tokens  $0.08
+  Cache Read:     724,991 tokens  $0.22
+  Cache Write:     62,233 tokens  $0.23
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+💰 TOTAL COST: $0.53
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+```
+
+### Cost Optimization: Haiku Subagents
+
+For large batches (8+ bookmarks by default), Smaug spawns parallel subagents. By default, these use Haiku instead of Sonnet, which cuts costs nearly in half:
+
+| Configuration | 20 Bookmarks | Time |
+|---------------|--------------|------|
+| Sonnet subagents | $1.00 | 4m 12s |
+| **Haiku subagents** | **$0.53** | 4m 18s |
+
+Same speed, ~50% cheaper. The categorization and filing tasks don't require Sonnet-level reasoning, so Haiku handles them well.
+
+This is configured in `.claude/commands/process-bookmarks.md` with `model="haiku"` in the Task calls.
 
 ## Troubleshooting
 
